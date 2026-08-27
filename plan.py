@@ -532,8 +532,8 @@ class PlanWorkspace:
 
 
 def load_ckpt(snapshot_path, device):
-    from models.dino import DinoV2Encoder
-    _ = DinoV2Encoder('dinov2_vits14', 'x_norm_patchtokens')
+    # The serialized checkpoint reconstructs its model modules directly. Avoid
+    # loading the moving DINOv2 main branch for checkpoints that do not use it.
     with snapshot_path.open("rb") as f:
         payload = torch.load(f, map_location=device)
     loaded_keys = []

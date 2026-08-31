@@ -1,4 +1,5 @@
 import logging
+from typing import Optional
 
 import torch
 import torch.nn as nn
@@ -55,13 +56,34 @@ class AdaJEPATrainer:
         for tensor, saved in self._snapshot:
             tensor.copy_(saved)
 
-    def finetune(self, obs_seqs: list, act_seqs: list, merge: bool = True) -> list:
+    def finetune(
+        self,
+        obs_seqs: list,
+        act_seqs: list,
+        merge: bool = True,
+        rng_seed: Optional[int] = None,
+    ) -> list:
         """Run `steps` optimization steps on the given trajectory segments.
 
         merge=True concatenates temporally contiguous segments into one long
         sequence; use merge=False for non-contiguous segments.
+        rng_seed isolates and fixes dropout randomness without changing the
+        caller's CPU or current-device RNG state.
         Returns the per-step prediction losses.
         """
+        if rng_seed is None:
+            return self._finetune(obs_seqs, act_seqs, merge=merge)
+        devices = []
+        if self.device.type == "cuda":
+            device_index = self.device.index
+            devices = [
+                torch.cuda.current_device() if device_index is None else device_index
+            ]
+        with torch.random.fork_rng(devices=devices):
+            torch.manual_seed(int(rng_seed))
+            return self._finetune(obs_seqs, act_seqs, merge=merge)
+
+    def _finetune(self, obs_seqs: list, act_seqs: list, merge: bool = True) -> list:
         if not obs_seqs or self.steps <= 0:
             return []
         if merge and len(obs_seqs) > 1:

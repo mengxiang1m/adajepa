@@ -12,6 +12,7 @@ import json
 import os
 import re
 import time
+from typing import Optional
 
 import numpy as np
 import torch
@@ -25,6 +26,9 @@ class AdaJEPAMPCPlanner(MPCPlanner):
         super().__init__(**kwargs)
         adapt = dict(adapt) if adapt else {}
         self.adajepa_finetune_every = adapt.get("finetune_every", 1)
+        self.adajepa_rng_seed = (
+            None if adapt.get("rng_seed") is None else int(adapt["rng_seed"])
+        )
         self.replay_mode, self.replay_size = self._parse_replay_buffer(adapt.get("replay_buffer", False))
         self.adajepa_trainer = AdaJEPATrainer(
             wm=self.wm,
@@ -137,7 +141,7 @@ class AdaJEPAMPCPlanner(MPCPlanner):
             "success": bool(self.is_success[0]),
             "t_plan_s": self.t_plan_s,
         }
-        extra_logs = None
+        extra_logs = {}
         if (self.iter + 1) % self.adajepa_finetune_every == 0:
             _cuda_sync()
             t0 = time.perf_counter()
@@ -148,9 +152,23 @@ class AdaJEPAMPCPlanner(MPCPlanner):
             rec["t_adajepa_s"] = time.perf_counter() - t0
             rec["adajepa/pred_loss"] = pred_loss
             self._record_adajepa_losses(self._sample_idx, self.iter + 1, step_losses)
-            extra_logs = {"adajepa/pred_loss": pred_loss}
+            extra_logs["adajepa/pred_loss"] = pred_loss
+            if self.adajepa_rng_seed is not None:
+                adaptation_seed = self._adaptation_seed()
+                rec["adajepa/rng_seed"] = adaptation_seed
+                extra_logs["adajepa/rng_seed"] = adaptation_seed
         self._records.append(rec)
-        return extra_logs
+        return extra_logs or None
+
+    def _adaptation_seed(self) -> Optional[int]:
+        if self.adajepa_rng_seed is None:
+            return None
+        modulus = 2**63 - 1
+        return (
+            self.adajepa_rng_seed
+            + self._sample_idx * 1_000_003
+            + (self.iter + 1) * 10_007
+        ) % modulus
 
     def _extract_adajepa_data(self, e_obses, taken_actions, iter_idx: int):
         """Slice this iteration's T*frameskip+1 env frames from the cumulative
@@ -182,7 +200,12 @@ class AdaJEPAMPCPlanner(MPCPlanner):
         """Finetune on the buffer. Returns (updated_scores, final_pred_loss, step_losses)."""
         # hard-buffer segments are non-contiguous, so they cannot be merged.
         merge = self.replay_mode != "hard"
-        step_losses = self.adajepa_trainer.finetune(obs_buffer, act_buffer, merge=merge)
+        step_losses = self.adajepa_trainer.finetune(
+            obs_buffer,
+            act_buffer,
+            merge=merge,
+            rng_seed=self._adaptation_seed(),
+        )
         pred_loss = step_losses[-1] if step_losses else 0.0
         if self.replay_mode == "hard":
             scores = self.adajepa_trainer.score_segments(obs_buffer, act_buffer)

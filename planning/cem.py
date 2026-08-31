@@ -1,9 +1,14 @@
-import torch
+import hashlib
+
 import numpy as np
+import torch
 from einops import rearrange, repeat
-from .base_planner import BasePlanner
-from utils import move_to_device
 from tqdm import tqdm
+
+from utils import move_to_device
+
+from .base_planner import BasePlanner
+
 
 class CEMPlanner(BasePlanner):
     def __init__(
@@ -22,6 +27,7 @@ class CEMPlanner(BasePlanner):
         wandb_run,
         logging_prefix="plan_0",
         log_filename="logs.json",
+        rng_seed=None,
         **kwargs,
     ):
         super().__init__(
@@ -40,6 +46,16 @@ class CEMPlanner(BasePlanner):
         self.opt_steps = opt_steps
         self.eval_every = eval_every
         self.logging_prefix = logging_prefix
+        self.rng_seed = None if rng_seed is None else int(rng_seed)
+
+    def _make_plan_generator(self):
+        if self.rng_seed is None:
+            return None
+        prefix_digest = hashlib.sha256(self.logging_prefix.encode("utf-8")).digest()
+        prefix_offset = int.from_bytes(prefix_digest[:8], byteorder="little", signed=False)
+        generator = torch.Generator(device="cpu")
+        generator.manual_seed((self.rng_seed + prefix_offset) % (2**63 - 1))
+        return generator
 
     def init_mu_sigma(self, obs_0, actions=None):
         """
@@ -80,6 +96,7 @@ class CEMPlanner(BasePlanner):
         mu, sigma = self.init_mu_sigma(obs_0, actions)
         mu, sigma = mu.to(self.device), sigma.to(self.device)
         n_evals = mu.shape[0]
+        generator = self._make_plan_generator()
 
         for i in tqdm(range(self.opt_steps)):
             # optimize individual instances
@@ -97,13 +114,13 @@ class CEMPlanner(BasePlanner):
                     )
                     for key, arr in z_obs_g.items()
                 }
-                action = (
-                    torch.randn(self.num_samples, self.horizon, self.action_dim).to(
-                        self.device
-                    )
-                    * sigma[traj]
-                    + mu[traj]
-                )
+                action_noise = torch.randn(
+                    self.num_samples,
+                    self.horizon,
+                    self.action_dim,
+                    generator=generator,
+                ).to(self.device)
+                action = action_noise * sigma[traj] + mu[traj]
                 action[0] = mu[traj]  # optional: make the first one mu itself
                 with torch.no_grad():
                     i_z_obses, i_zs = self.wm.rollout(

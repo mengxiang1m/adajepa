@@ -191,6 +191,25 @@ def clear_lora_branches(predictor: nn.Module) -> None:
 
 
 @torch.no_grad()
+def clear_history_adapter(predictor: nn.Module) -> None:
+    """Clear only retrieved history while preserving the episode-local branch."""
+    for _, module in iter_lora_modules(predictor):
+        module.clear_history()
+
+
+@torch.no_grad()
+def capture_history_adapter(predictor: nn.Module) -> AdapterState:
+    """Snapshot the currently loaded history branch without changing devices."""
+    return {
+        name: {
+            "a": module.history_a.detach().clone(),
+            "b": module.history_b.detach().clone(),
+        }
+        for name, module in iter_lora_modules(predictor)
+    }
+
+
+@torch.no_grad()
 def load_history_adapter(predictor: nn.Module, state: AdapterState) -> None:
     modules = dict(iter_lora_modules(predictor))
     if set(state) != set(modules):

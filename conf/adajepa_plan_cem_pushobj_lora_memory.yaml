@@ -61,6 +61,7 @@ planner:
     alpha: 32.0
     dropout: 0.0
     key_steps: 10
+    validation_steps: 5
     capacity: 32
     min_similarity: 0.9
     store_min_norm: 0.0

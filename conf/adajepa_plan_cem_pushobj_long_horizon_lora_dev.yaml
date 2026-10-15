@@ -1,0 +1,12 @@
+defaults:
+  - adajepa_plan_cem_pushobj_long_horizon_lora
+  - _self_
+
+# The manifest is supplied after deterministic target generation and hash audit.
+n_evals: 300
+long_horizon_manifest_path: null
+planner:
+  long_horizon_memory:
+    diagnostics_enabled: true
+    diagnostics_output_dir: long_horizon_diagnostics
+name: adajepa_plan_cem_pushobj_long_horizon_lora_dev

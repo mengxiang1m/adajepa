@@ -31,6 +31,10 @@ class PlanEvaluator:  # evaluator for planning
         decode_for_viz=True,
         ood_corruption=None,
         ood_level=None,
+        ood_deterministic=False,
+        ood_seed_by_sample=None,
+        ood_corruption_by_sample=None,
+        ood_level_by_sample=None,
     ):
         self.obs_0 = obs_0
         self.obs_g = obs_g
@@ -45,12 +49,59 @@ class PlanEvaluator:  # evaluator for planning
         self.decode_for_viz = bool(decode_for_viz)
         self.ood_corruption = ood_corruption  # e.g. "blur", "snp1", "snp5", "dark", or None
         self.ood_level = ood_level
+        self.ood_deterministic = bool(ood_deterministic)
+        self.ood_seed_by_sample = (
+            list(ood_seed_by_sample) if ood_seed_by_sample is not None else None
+        )
+        self.ood_corruption_by_sample = (
+            list(ood_corruption_by_sample)
+            if ood_corruption_by_sample is not None
+            else None
+        )
+        self.ood_level_by_sample = (
+            list(ood_level_by_sample) if ood_level_by_sample is not None else None
+        )
+        seed_count = len(seed) if isinstance(seed, (list, tuple, np.ndarray)) else 1
+        if self.ood_seed_by_sample is not None and len(self.ood_seed_by_sample) != seed_count:
+            raise ValueError("ood_seed_by_sample must contain one seed per evaluation sample")
+        if self.ood_corruption_by_sample is not None and len(self.ood_corruption_by_sample) != seed_count:
+            raise ValueError("ood_corruption_by_sample must contain one value per evaluation sample")
+        if self.ood_level_by_sample is not None and len(self.ood_level_by_sample) != seed_count:
+            raise ValueError("ood_level_by_sample must contain one value per evaluation sample")
         self.device = next(wm.parameters()).device
 
         self.plot_full = False  # plot all frames or frames after frameskip
 
     def _corrupt(self, obs, seed_offset=0, random_per_call=False):
         """Apply OOD corruption to an observation dict if configured."""
+        if self.ood_deterministic and (
+            self.ood_corruption not in (None, "none")
+            or self.ood_corruption_by_sample is not None
+        ):
+            seeds = self.ood_seed_by_sample if self.ood_seed_by_sample is not None else self.seed
+            if not isinstance(seeds, (list, tuple, np.ndarray)):
+                seeds = [seeds]
+            if obs["visual"].shape[0] != len(seeds):
+                raise ValueError("deterministic OOD seeds and observation batch differ in size")
+            rows = []
+            for index, seed_value in enumerate(seeds):
+                row = {name: value[index : index + 1] for name, value in obs.items()}
+                rows.append(
+                    corrupt_obs_dict(
+                        row,
+                        self.ood_corruption_by_sample[index]
+                        if self.ood_corruption_by_sample is not None
+                        else self.ood_corruption,
+                        self.ood_level_by_sample[index]
+                        if self.ood_level_by_sample is not None
+                        else self.ood_level,
+                        seed=int(seed_value) + int(seed_offset),
+                    )
+                )
+            return {
+                name: np.concatenate([row[name] for row in rows], axis=0)
+                for name in obs
+            }
         if random_per_call:
             seed = None  # fresh noise each call
         else:

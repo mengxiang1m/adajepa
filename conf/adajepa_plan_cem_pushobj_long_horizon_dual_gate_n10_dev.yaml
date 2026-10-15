@@ -1,0 +1,17 @@
+defaults:
+  - adajepa_plan_cem_pushobj_long_horizon_lora_dev
+  - _self_
+
+# CEM-only development method: N=10 joint history with two learned scalar gates.
+planner:
+  long_horizon_memory:
+    memory_mode: joint_history_dual_gate
+    capacity: 1
+    rank: 16
+    alpha: 32.0
+    scope: predictor_encoder
+    joint_history_warmup_episodes: 10
+    joint_history_epochs: 3
+    dual_gate_grid: [0.0, 0.125, 0.25, 0.375, 0.5, 0.625, 0.75, 0.875, 1.0]
+
+name: adajepa_plan_cem_pushobj_long_horizon_dual_gate_n10_dev

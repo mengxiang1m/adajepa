@@ -108,6 +108,9 @@ class AdaJEPAMPCPlanner(MPCPlanner):
             self.evaluator.obs_g,
             self.evaluator.state_0,
             self.evaluator.state_g,
+            getattr(self.evaluator, "ood_seed_by_sample", None),
+            getattr(self.evaluator, "ood_corruption_by_sample", None),
+            getattr(self.evaluator, "ood_level_by_sample", None),
         )
         self.evaluator.env = env_i
         self.evaluator.seed = seed_i
@@ -115,6 +118,12 @@ class AdaJEPAMPCPlanner(MPCPlanner):
         self.evaluator.obs_g = obs_g_i
         self.evaluator.state_0 = state_0_i
         self.evaluator.state_g = state_g_i
+        if saved[6] is not None:
+            self.evaluator.ood_seed_by_sample = [saved[6][self._sample_idx]]
+        if saved[7] is not None:
+            self.evaluator.ood_corruption_by_sample = [saved[7][self._sample_idx]]
+        if saved[8] is not None:
+            self.evaluator.ood_level_by_sample = [saved[8][self._sample_idx]]
         try:
             return super().plan(obs_0_i, obs_g_i)
         finally:
@@ -125,6 +134,9 @@ class AdaJEPAMPCPlanner(MPCPlanner):
                 self.evaluator.obs_g,
                 self.evaluator.state_0,
                 self.evaluator.state_g,
+                self.evaluator.ood_seed_by_sample,
+                self.evaluator.ood_corruption_by_sample,
+                self.evaluator.ood_level_by_sample,
             ) = saved
 
     def _post_env_feedback(self, taken_actions, e_obses):

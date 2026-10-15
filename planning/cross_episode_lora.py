@@ -24,6 +24,26 @@ from .adajepa_mpc import AdaJEPAMPCPlanner
 log = logging.getLogger(__name__)
 
 
+def _slice_transition_window(
+    obs_seqs: Sequence[dict[str, torch.Tensor]],
+    act_seqs: Sequence[torch.Tensor],
+    start_step: int,
+    num_steps: int,
+) -> tuple[dict[str, torch.Tensor], torch.Tensor]:
+    """Return a fixed window of already observed transitions."""
+    if start_step < 0 or num_steps <= 0:
+        raise ValueError("transition window start and length must be valid")
+    if not obs_seqs or len(obs_seqs) != len(act_seqs):
+        raise ValueError("observation and action segments must be non-empty and aligned")
+    merged_obs, merged_act = AdaJEPATrainer._merge_segments(list(obs_seqs), list(act_seqs))
+    stop_step = start_step + num_steps
+    if merged_act[0].shape[1] < stop_step:
+        raise ValueError(f"need at least {stop_step} observed actions for the transition window")
+    obs = {name: value[:, start_step : stop_step + 1].clone() for name, value in merged_obs[0].items()}
+    act = merged_act[0][:, start_step:stop_step].clone()
+    return obs, act
+
+
 class PredictorLoRAAdaJEPATrainer(AdaJEPATrainer):
     """Run the original AdaJEPA loss while updating only the online LoRA branch."""
 

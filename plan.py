@@ -20,6 +20,11 @@ from env.venv import SubprocVectorEnv
 from custom_resolvers import replace_slash
 from preprocessor import Preprocessor
 from planning.evaluator import PlanEvaluator
+from planning.experiment_targets import (
+    load_frozen_mixed_segments,
+    load_long_horizon_manifest,
+    select_evaluation_segments,
+)
 from planning.image_corruption import corrupt_obs_dict
 from utils import cfg_to_dict, seed
 
@@ -52,6 +57,7 @@ POINT_MAZE_MEDIUM_HARD_MIN_DIST = 3.0
 POINT_MAZE_QVEL_RANGE = np.array(
     [[-5.2262554, 5.2262554], [-5.2262554, 5.2262554]], dtype=np.float32
 )
+
 
 def planning_main_in_dir(working_dir, cfg_dict):
     os.chdir(working_dir)
@@ -155,6 +161,10 @@ class PlanWorkspace:
         self.n_evals = cfg_dict["n_evals"]
         self.goal_source = cfg_dict["goal_source"]
         self.goal_H = cfg_dict["goal_H"]
+        self._ood_corruption_by_sample = None
+        self._ood_seed_by_sample = None
+        self._ood_level_by_sample = None
+        self._long_horizon_task_rows = None
         self.action_dim = self.dset.action_dim * self.frameskip
         self.debug_dset_init = cfg_dict["debug_dset_init"]
 
@@ -193,6 +203,10 @@ class PlanWorkspace:
             decode_for_viz=self.cfg_dict.get("decode_for_viz", True),
             ood_corruption=self.cfg_dict.get("ood_corruption", None),
             ood_level=self.cfg_dict.get("ood_level", None),
+            ood_deterministic=self.cfg_dict.get("ood_deterministic", False),
+            ood_seed_by_sample=self._ood_seed_by_sample,
+            ood_corruption_by_sample=self._ood_corruption_by_sample,
+            ood_level_by_sample=self._ood_level_by_sample,
         )
 
         if self.wandb_run is None or isinstance(
@@ -222,6 +236,14 @@ class PlanWorkspace:
             wandb_run=self.wandb_run,
             log_filename=self.log_filename,
         )
+        if self._long_horizon_task_rows is not None:
+            self.planner.sequence_ids = [
+                row["sequence_id"] for row in self._long_horizon_task_rows
+            ]
+            self.planner.episode_ids = [
+                row["episode_id"] for row in self._long_horizon_task_rows
+            ]
+            self.planner.task_rows = self._long_horizon_task_rows
 
 
         self.planner.horizon = self.goal_H_model_steps
@@ -421,13 +443,38 @@ class PlanWorkspace:
 
     def prepare_targets_from_segments(self, file_path):
         """Load pre-sampled segments (init state + actions), replay in env to get observations."""
-        with open(file_path, "rb") as f:
-            data = pickle.load(f)
-        segments = data["segments"]
-        self.goal_H = data["traj_len"]
-
-        rng = random.Random(self.cfg_dict["seed"])
-        chosen = rng.sample(segments, min(self.n_evals, len(segments)))
+        long_horizon_manifest = self.cfg_dict.get("long_horizon_manifest_path")
+        mixed_manifest = self.cfg_dict.get("eval_segment_manifest_path")
+        if long_horizon_manifest:
+            if mixed_manifest or self.cfg_dict.get("eval_segment_indices") is not None:
+                raise ValueError(
+                    "long_horizon_manifest_path cannot be combined with mixed manifests or indices"
+                )
+            chosen, task_rows = load_long_horizon_manifest(
+                long_horizon_manifest, self.n_evals
+            )
+            self._long_horizon_task_rows = task_rows
+            self.eval_seed = [int(row["env_seed"]) for row in task_rows]
+            self._ood_seed_by_sample = [int(row["noise_seed"]) for row in task_rows]
+            self._ood_corruption_by_sample = [row["noise"] for row in task_rows]
+            self._ood_level_by_sample = [row["noise_level"] for row in task_rows]
+            self.goal_H = 25
+        elif mixed_manifest:
+            if self.cfg_dict.get("eval_segment_indices") is not None:
+                raise ValueError("mixed target manifest and eval_segment_indices cannot both be set")
+            chosen = load_frozen_mixed_segments(mixed_manifest, self.n_evals)
+            self.goal_H = 25
+        else:
+            with open(file_path, "rb") as f:
+                data = pickle.load(f)
+            segments = data["segments"]
+            self.goal_H = data["traj_len"]
+            chosen = select_evaluation_segments(
+                segments,
+                self.n_evals,
+                self.cfg_dict["seed"],
+                self.cfg_dict.get("eval_segment_indices"),
+            )
 
         # Pad 5-dim states to 7-dim (add zero velocities) if needed
         raw_init = np.array([s["states"][0] for s in chosen])
@@ -449,7 +496,7 @@ class PlanWorkspace:
             self.eval_seed, init_states, env_actions
         )
         ood_corruption = self.cfg_dict.get("ood_corruption", None)
-        if ood_corruption:
+        if ood_corruption and not long_horizon_manifest:
             base_seed = (
                 self.eval_seed[0]
                 if isinstance(self.eval_seed, (list, tuple, np.ndarray))
@@ -459,6 +506,8 @@ class PlanWorkspace:
                 rollout_obses, ood_corruption, self.cfg_dict.get("ood_level", None),
                 seed=int(base_seed),
             )
+        if long_horizon_manifest:
+            rollout_obses = self._corrupt_task_rows(rollout_obses, task_rows)
         self.obs_0 = {
             key: np.expand_dims(arr[:, 0], axis=1)
             for key, arr in rollout_obses.items()
@@ -477,6 +526,25 @@ class PlanWorkspace:
         else:
             self.gt_actions = None
 
+    @staticmethod
+    def _corrupt_task_rows(obses, task_rows):
+        """Apply each task's fixed visual corruption independently and reproducibly."""
+        rows = []
+        for index, task in enumerate(task_rows):
+            row = {name: value[index : index + 1] for name, value in obses.items()}
+            rows.append(
+                corrupt_obs_dict(
+                    row,
+                    task["noise"],
+                    task["noise_level"],
+                    seed=int(task["noise_seed"]),
+                )
+            )
+        return {
+            name: np.concatenate([row[name] for row in rows], axis=0)
+            for name in obses
+        }
+
     def prepare_targets_from_file(self, file_path):
         with open(file_path, "rb") as f:
             data = pickle.load(f)
@@ -488,18 +556,18 @@ class PlanWorkspace:
         self.goal_H = data["goal_H"]
 
     def dump_targets(self):
+        payload = {
+            "obs_0": self.obs_0,
+            "obs_g": self.obs_g,
+            "state_0": self.state_0,
+            "state_g": self.state_g,
+            "gt_actions": self.gt_actions,
+            "goal_H": self.goal_H,
+        }
+        if self._long_horizon_task_rows is not None:
+            payload["long_horizon_task_rows"] = self._long_horizon_task_rows
         with open("plan_targets.pkl", "wb") as f:
-            pickle.dump(
-                {
-                    "obs_0": self.obs_0,
-                    "obs_g": self.obs_g,
-                    "state_0": self.state_0,
-                    "state_g": self.state_g,
-                    "gt_actions": self.gt_actions,
-                    "goal_H": self.goal_H,
-                },
-                f,
-            )
+            pickle.dump(payload, f)
         file_path = os.path.abspath("plan_targets.pkl")
         print(f"Dumped plan targets to {file_path}")
 
@@ -513,6 +581,7 @@ class PlanWorkspace:
             obs_g=self.obs_g,
             actions=actions_init,
         )
+        self._dump_long_horizon_episode_records(action_len)
         logs, successes, _, _ = self.evaluator.eval_actions(
             actions.detach(), action_len, save_video=True, filename="output_final"
         )
@@ -530,10 +599,62 @@ class PlanWorkspace:
             file.write(json.dumps(logs_entry) + "\n")
         return logs
 
+    def _dump_long_horizon_episode_records(self, action_len):
+        """Write one normalized row per task for the shared CEM table script."""
+        if self._long_horizon_task_rows is None:
+            return
+        records = getattr(self.planner, "_records", [])
+        target = str(self.cfg_dict.get("planner", {}).get("_target_", ""))
+        adapt = self.cfg_dict.get("planner", {}).get("adapt", {}) or {}
+        if "long_horizon_lora" in target:
+            method = "Ours"
+        elif int(adapt.get("steps", 1)) <= 0:
+            method = "Frozen"
+        else:
+            method = "AdaJEPA"
+        rows = []
+        for index, task in enumerate(self._long_horizon_task_rows):
+            sample_records = [
+                record for record in records if record.get("sample_idx") == index
+            ]
+            # AdaJEPA planners run each evaluation sample independently and
+            # retain only the last batch-1 ``is_success`` array.  The returned
+            # action length is the stable per-sample success contract.
+            success_value = bool(np.isfinite(action_len[index]))
+            if np.isfinite(action_len[index]):
+                completion = int(action_len[index] * self.frameskip)
+            else:
+                max_iter = int(self.cfg_dict["planner"].get("max_iter", 30))
+                model_taken = int(self.cfg_dict["planner"].get("n_taken_actions", 5)) // self.frameskip
+                completion = max_iter * model_taken * self.frameskip
+            rows.append(
+                {
+                    "method": method,
+                    "chain_id": task["sequence_id"],
+                    "episode_position": sum(
+                        1
+                        for previous in self._long_horizon_task_rows[: index + 1]
+                        if previous["sequence_id"] == task["sequence_id"]
+                    ),
+                    "shape": task["shape"],
+                    "noise": task["noise"],
+                    "success_step": completion if success_value else None,
+                    "runtime_s": sum(
+                        float(record.get("t_plan_s", 0.0))
+                        + float(record.get("t_adajepa_s", 0.0))
+                        + float(record.get("long_horizon_memory/selection_s", 0.0))
+                        + float(record.get("long_horizon_memory/validation_s", 0.0))
+                        + float(record.get("long_horizon_memory/storage_s", 0.0))
+                        for record in sample_records
+                    ),
+                }
+            )
+        with open("episode_records.jsonl", "w", encoding="utf-8") as stream:
+            for row in rows:
+                stream.write(json.dumps(row, ensure_ascii=False) + "\n")
+
 
 def load_ckpt(snapshot_path, device):
-    # The serialized checkpoint reconstructs its model modules directly. Avoid
-    # loading the moving DINOv2 main branch for checkpoints that do not use it.
     with snapshot_path.open("rb") as f:
         payload = torch.load(f, map_location=device)
     loaded_keys = []
@@ -728,7 +849,6 @@ def planning_main(cfg_dict):
                 for i in range(cfg_dict["n_evals"])
             ]
         )
-    # use dummy vector env for wall and deformable envs
     elif model_cfg.env.name == "wall" or model_cfg.env.name == "deformable_env":
         from env.serial_vector_env import SerialVectorEnv
         env = SerialVectorEnv(

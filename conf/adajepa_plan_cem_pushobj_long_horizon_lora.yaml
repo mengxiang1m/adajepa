@@ -1,0 +1,55 @@
+defaults:
+  - adajepa_plan_cem_pushobj
+  - _self_
+
+# CEM-only 50-episode PushObj task-chain entry.  The manifest freezes the
+# ordered task identities, shape sources, corruption and per-task seeds.
+long_horizon_manifest_path: null
+ood_corruption: null
+ood_level: null
+ood_deterministic: true
+wandb_logging: false
+
+planner:
+  _target_: planning.long_horizon_lora.LongHorizonLoRAMPCPlanner
+  max_iter: 30
+  n_taken_actions: 5
+  adapt:
+    lr: 5e-4
+    steps: 1
+    optimizer: adam
+    finetune_every: 1
+    replay_buffer: recent5
+    finetune_encoder: true
+    encoder_lr: 1e-5
+    last_layer_only: true
+    encoder_last_layer_only: true
+  long_horizon_memory:
+    enabled: true
+    scope: predictor_encoder
+    rank: 16
+    alpha: 32.0
+    capacity: 50
+    memory_mode: episode
+    retrieve_k: 8
+    key_env_actions: 5
+    validation_env_actions: 25
+    lambda_grid: [0.0, 0.25, 0.5, 1.0]
+    acceptance_relative_improvement: 1.0e-4
+    store_min_norm: 0.0
+    model_hash: null
+    extraction_layer: AdaJEPA selected predictor last block and encoder head
+    diagnostics_enabled: false
+    diagnostics_output_dir: null
+    joint_history_warmup_episodes: 0
+    joint_history_epochs: 0
+  reuse_actions: true
+  sub_planner:
+    target: planning.cem.CEMPlanner
+    horizon: 25
+    topk: 30
+    num_samples: 200
+    var_scale: 1
+    opt_steps: 10
+    eval_every: -1
+  name: adajepa_plan_cem_pushobj_long_horizon_lora
